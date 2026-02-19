@@ -620,9 +620,40 @@ async def fetch_codex_models() -> list:
         _log("MODEL", f"fetch error: {e}", level="error")
     return []
 
+def _map_content_types(role: str, content):
+    """Convert OpenAI content types to Codex Responses API types.
+
+    OpenAI Chat: type="text" | type="image_url"
+    Codex API:   type="input_text" | type="input_image" | type="output_text"
+    """
+    if not isinstance(content, list):
+        return content
+    mapped = []
+    for item in content:
+        if not isinstance(item, dict):
+            mapped.append(item)
+            continue
+        item = dict(item)
+        t = item.get("type")
+        if t == "text":
+            item["type"] = "output_text" if role == "assistant" else "input_text"
+        elif t == "image_url":
+            item["type"] = "input_image"
+            # aiohttp-style: Codex expects {"type":"input_image","image_url":...}
+        mapped.append(item)
+    return mapped
+
+
 def convert_messages_to_codex_input(messages):
-    # Filter out system messages, they go to instructions
-    return [m for m in messages if m.get("role") != "system"]
+    """Convert OpenAI chat messages to Codex Responses API input format."""
+    result = []
+    for m in messages:
+        if m.get("role") == "system":
+            continue
+        msg = dict(m)
+        msg["content"] = _map_content_types(msg.get("role", "user"), msg.get("content"))
+        result.append(msg)
+    return result
 
 def extract_system_prompt(messages):
     for m in messages:
