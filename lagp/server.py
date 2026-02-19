@@ -672,6 +672,7 @@ async def proxy_codex_request(token, body_json):
         'User-Agent': 'vars (macOS; arm64)', # Mimic vars
         'accept': 'text/event-stream',
         'content-type': 'application/json',
+        'accept-encoding': 'identity',  # disable gzip to avoid httpx sync/async stream mismatch
     }
     
     model_info = f"{GREEN}{codex_model}{RESET}" if original_model == codex_model else f"{DIM}{original_model}{RESET} → {GREEN}{codex_model}{RESET}"
@@ -692,19 +693,23 @@ async def proxy_codex_request(token, body_json):
 
         # Common generator that yields OpenAI chunks
         async def stream_generator():
-            try:
-                async for line in r.aiter_lines():
+            buf = b""
+            async for raw_chunk in r.aiter_bytes():
+                buf += raw_chunk
+                while b"\n" in buf:
+                    raw_line, buf = buf.split(b"\n", 1)
+                    line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data: "):
                         continue
-                        
+
                     data_str = line[6:].strip()
                     if data_str == "[DONE]":
-                        yield None # Signal done
-                        break
-                        
+                        yield None  # Signal done
+                        return
+
                     try:
                         data = json.loads(data_str)
-                        
+
                         if data.get("type") == "response.output_text.delta":
                             content = data.get("delta", "")
                             if content:
@@ -720,14 +725,12 @@ async def proxy_codex_request(token, body_json):
                                     }]
                                 }
                                 yield chunk
-                                
+
                         elif data.get("type") == "response.failed":
-                             _log("OPENAI", f"stream error: {data}", level="error")
-                            
+                            _log("OPENAI", f"stream error: {data}", level="error")
+
                     except json.JSONDecodeError:
                         continue
-            finally:
-                pass # Don't close client here if we need to return
         
         if client_expects_stream:
             # Re-yield as SSE events
@@ -839,8 +842,9 @@ async def handle_ollama_chat(request: Request):
         'User-Agent': 'vars (macOS; arm64)',
         'accept': 'text/event-stream',
         'content-type': 'application/json',
+        'accept-encoding': 'identity',  # disable gzip to avoid httpx sync/async stream mismatch
     }
-    
+
     model_info = f"{GREEN}{codex_model}{RESET}" if original_model == codex_model else f"{DIM}{original_model}{RESET} → {GREEN}{codex_model}{RESET}"
     _log("OLLAMA", f"chat  {model_info}  {GREEN}stream=on{RESET}")
     
@@ -858,51 +862,50 @@ async def handle_ollama_chat(request: Request):
 
         async def ollama_generator():
             done_sent = False
+            buf = b""
             try:
-                async for line in r.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
-                    else:
-                        # Sometimes functionality might omit prefix? Unlikely for SSE but let's be safe
-                        # Actually strict SSE requires data:
-                        continue
+                async for raw_chunk in r.aiter_bytes():
+                    buf += raw_chunk
+                    while b"\n" in buf:
+                        raw_line, buf = buf.split(b"\n", 1)
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line or not line.startswith("data: "):
+                            continue
 
-                    if data_str == "[DONE]":
-                        done_sent = True
-                        final_msg = {
-                            "model": original_model,
-                            "created_at": datetime.now().isoformat() + "Z",
-                            "message": {"role": "assistant", "content": ""},
-                            "done_reason": "stop",
-                            "done": True,
-                            "total_duration": 0,
-                            "load_duration": 0,
-                            "prompt_eval_count": 0,
-                            "eval_count": 0
-                        }
-                        yield json.dumps(final_msg) + "\n"
-                        break
-                    
-                    try:
-                        data = json.loads(data_str)
-                        if data.get("type") == "response.output_text.delta":
-                            content = data.get("delta", "")
-                            if content:
-                                msg = {
-                                    "model": original_model,
-                                    "created_at": datetime.now().isoformat() + "Z",
-                                    "message": {"role": "assistant", "content": content},
-                                    "done": False
-                                }
-                                yield json.dumps(msg) + "\n"
-                    except:
-                        continue
-                
-                # If stream ends but we didn't send done (e.g. standard connection close)
+                        data_str = line[6:].strip()
+
+                        if data_str == "[DONE]":
+                            done_sent = True
+                            final_msg = {
+                                "model": original_model,
+                                "created_at": datetime.now().isoformat() + "Z",
+                                "message": {"role": "assistant", "content": ""},
+                                "done_reason": "stop",
+                                "done": True,
+                                "total_duration": 0,
+                                "load_duration": 0,
+                                "prompt_eval_count": 0,
+                                "eval_count": 0
+                            }
+                            yield json.dumps(final_msg) + "\n"
+                            return
+
+                        try:
+                            data = json.loads(data_str)
+                            if data.get("type") == "response.output_text.delta":
+                                content = data.get("delta", "")
+                                if content:
+                                    msg = {
+                                        "model": original_model,
+                                        "created_at": datetime.now().isoformat() + "Z",
+                                        "message": {"role": "assistant", "content": content},
+                                        "done": False
+                                    }
+                                    yield json.dumps(msg) + "\n"
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+
+                # If stream ends without [DONE] (e.g. connection close)
                 if not done_sent:
                     final_msg = {
                         "model": original_model,
