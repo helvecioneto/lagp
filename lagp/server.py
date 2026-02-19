@@ -694,7 +694,7 @@ async def proxy_codex_request(token, body_json):
         # Common generator that yields OpenAI chunks
         async def stream_generator():
             buf = b""
-            async for raw_chunk in r.aiter_bytes():
+            async for raw_chunk in r.aiter_raw():
                 buf += raw_chunk
                 while b"\n" in buf:
                     raw_line, buf = buf.split(b"\n", 1)
@@ -864,7 +864,7 @@ async def handle_ollama_chat(request: Request):
             done_sent = False
             buf = b""
             try:
-                async for raw_chunk in r.aiter_bytes():
+                async for raw_chunk in r.aiter_raw():
                     buf += raw_chunk
                     while b"\n" in buf:
                         raw_line, buf = buf.split(b"\n", 1)
