@@ -141,6 +141,112 @@ print(response.choices[0].message.content)
 
 ---
 
+## Running on a remote server
+
+LAGP works great on headless remote servers (VPS, cloud instances, etc.). Because the OAuth provider only allows `localhost` as a valid redirect URI, you cannot authenticate directly on a remote machine through its public IP. There are three supported approaches.
+
+---
+
+### Method 1 — Token sync (recommended)
+
+Authenticate on your local machine and push the tokens automatically to the remote server over HTTP.
+
+**On the remote server**, start LAGP in no-browser mode with a shared secret:
+
+```bash
+lagp --no-browser --sync-secret <your-secret>
+```
+
+**On your local machine**, run:
+
+```bash
+lagp --sync-to http://<server-ip>:11434 --sync-secret <your-secret>
+```
+
+A browser opens, you log in with your OpenAI account, and the tokens are pushed to the remote server automatically. From that point the remote server is fully authenticated.
+
+**Network requirement:** port `11434` must be open on the remote server.
+
+> **Note:** `--sync-secret` is strongly recommended. Without it, anyone who can reach port `11434` could push arbitrary tokens to your server.
+
+---
+
+### Method 2 — SSH tunnel
+
+No configuration needed beyond SSH access. The tunnel makes the remote server's ports appear as local ports, so `localhost` redirect URIs work transparently.
+
+**Open two tunnels from your local machine:**
+
+```bash
+ssh -L 11434:localhost:11434 -L 1455:localhost:1455 user@<server>
+```
+
+**On the remote server** (in another terminal or tmux):
+
+```bash
+lagp --no-browser
+```
+
+**On your local machine**, open in a browser:
+
+```
+http://localhost:11434/login
+```
+
+OAuth redirects to `localhost:1455`, which the tunnel forwards to the remote server. Tokens are saved on the server. Close the tunnel when done — `lagp` runs independently from that point.
+
+**Network requirement:** only SSH (port 22) needs to be open.
+
+---
+
+### Method 3 — Copy auth.json manually
+
+If you have already authenticated locally, just copy the token file to the remote server:
+
+```bash
+scp ~/.lagp/auth.json user@<server>:~/.lagp/auth.json
+```
+
+Then start LAGP on the remote server:
+
+```bash
+lagp --no-browser
+```
+
+It will load the existing token and start immediately. Tokens refresh automatically, so this file stays valid until you explicitly log out.
+
+---
+
+### Comparison
+
+| | Method 1 (sync) | Method 2 (SSH tunnel) | Method 3 (copy) |
+|---|:---:|:---:|:---:|
+| Requires open port | 11434 | 22 only | 22 only |
+| Fully automated | ✓ | — | — |
+| No extra tooling | ✓ | needs SSH tunnel | needs SCP |
+| Works without local LAGP | — | — | ✓ |
+
+---
+
+### Re-authentication
+
+Tokens expire eventually. To re-authenticate on a remote server, run either Method 1 or Method 2 again. The new token overwrites the old one at `~/.lagp/auth.json`.
+
+---
+
+## CLI reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--port PORT` | `11434` | Port for the proxy server |
+| `--callback-port PORT` | `1455` | Port for the OAuth callback listener |
+| `--no-browser` | off | Do not open a browser automatically |
+| `--sync-to URL` | — | Push tokens to a remote LAGP after login |
+| `--sync-secret SECRET` | — | Shared secret protecting the `/auth/sync` endpoint |
+| `--log-level LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
+---
+
 ## Token storage
 
 The auth token is stored at `~/.lagp/auth.json` on all platforms. To log out, delete this file and restart `lagp`.

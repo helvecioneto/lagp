@@ -7,7 +7,6 @@ import base64
 import webbrowser
 import asyncio
 import time
-import socket
 from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -1061,43 +1060,28 @@ def print_startup_banner():
     print(f'      -d \'{{"model":"gpt-5.3-codex","messages":[{{"role":"user","content":"hi"}}]}}\'')
     print(f"\n{'─' * 48}")
 
-    if SYNC_TO:
-        print(f"  {CYAN}→ Sync ativo:{RESET} tokens enviados para {SYNC_TO} após auth")
-
     if not authenticated:
-        # Modo: servidor remoto aguardando tokens via sync
+        # Remote server waiting for token sync
         if SYNC_SECRET and not SYNC_TO:
-            detected_ip = _get_local_ip()
-            sync_cmd = f"lagp --sync-to http://{detected_ip}:{PORT} --sync-secret ****"
-            print(f"  {YELLOW}→ Aguardando tokens via /auth/sync{RESET}")
-            print(f"    Na máquina local execute:")
-            print(f"    {CYAN}{sync_cmd}{RESET}")
-        # Modo: browser manual com callback-host explícito
-        elif NO_BROWSER and CALLBACK_HOST != 'localhost':
-            print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
-            print(f"    {server_url}/login")
-        # Modo: browser automático (local)
+            print(f"  {YELLOW}→ Waiting for tokens via /auth/sync{RESET}")
+            print(f"    On your local machine, run:")
+            print(f"    {CYAN}lagp --sync-to http://<server-ip>:{PORT} --sync-secret <secret>{RESET}")
+        # Local machine pushing tokens to remote after auth
+        elif SYNC_TO:
+            print(f"  {YELLOW}→ After login, tokens will be pushed to the remote server.{RESET}")
+            print(f"    Or manually visit: {server_url}/login")
+        # Browser opens automatically (local mode)
         elif not NO_BROWSER:
             print(f"  {YELLOW}→ Opening browser for login in 2 seconds...{RESET}")
             print(f"    Or manually visit: {server_url}/login")
-        # Modo: no-browser sem callback-host (genérico)
+        # No-browser fallback
         else:
-            print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
+            print(f"  {YELLOW}→ Open the URL below in your browser to authenticate:{RESET}")
             print(f"    {server_url}/login")
 
+    print(f"\n{'─' * 48}")
+    print(f"  {DIM}Running on a remote server?  See README for setup options.{RESET}")
     print()
-
-
-def _get_local_ip() -> str:
-    """Retorna o IP de saída do servidor (melhor estimativa do IP acessível externamente)."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return socket.gethostname()
 
 
 def _open_login_browser():
@@ -1129,6 +1113,13 @@ def main():
     SYNC_TO = args.sync_to.rstrip('/')
     SYNC_SECRET = args.sync_secret
     REDIRECT_URI = f'http://{CALLBACK_HOST}:{CALLBACK_PORT}/auth/callback'
+
+    if CALLBACK_HOST not in ('localhost', '127.0.0.1'):
+        print(f"\n{YELLOW}{BOLD}⚠  Atenção:{RESET}{YELLOW} --callback-host '{CALLBACK_HOST}' pode falhar no OAuth.")
+        print(f"   O provider OAuth só aceita 'localhost' como redirect_uri.")
+        print(f"   Use --sync-to + --sync-secret para autenticação remota:{RESET}")
+        print(f"   {DIM}Servidor: lagp --no-browser --sync-secret KEY{RESET}")
+        print(f"   {DIM}Local:    lagp --sync-to http://{CALLBACK_HOST}:{PORT} --sync-secret KEY{RESET}\n")
 
     callback_bind = '0.0.0.0' if CALLBACK_HOST != 'localhost' else '127.0.0.1'
     start_callback_server(callback_bind)
