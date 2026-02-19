@@ -650,8 +650,12 @@ def convert_messages_to_codex_input(messages):
     for m in messages:
         if m.get("role") == "system":
             continue
+        content = m.get("content")
+        if content is None:
+            # Skip messages with null content (e.g. tool-call placeholder messages)
+            continue
         msg = dict(m)
-        msg["content"] = _map_content_types(msg.get("role", "user"), msg.get("content"))
+        msg["content"] = _map_content_types(msg.get("role", "user"), content)
         result.append(msg)
     return result
 
