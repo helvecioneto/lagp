@@ -7,6 +7,7 @@ import base64
 import webbrowser
 import asyncio
 import time
+import socket
 from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -1064,14 +1065,39 @@ def print_startup_banner():
         print(f"  {CYAN}→ Sync ativo:{RESET} tokens enviados para {SYNC_TO} após auth")
 
     if not authenticated:
-        if NO_BROWSER:
+        # Modo: servidor remoto aguardando tokens via sync
+        if SYNC_SECRET and not SYNC_TO:
+            detected_ip = _get_local_ip()
+            sync_cmd = f"lagp --sync-to http://{detected_ip}:{PORT} --sync-secret ****"
+            print(f"  {YELLOW}→ Aguardando tokens via /auth/sync{RESET}")
+            print(f"    Na máquina local execute:")
+            print(f"    {CYAN}{sync_cmd}{RESET}")
+        # Modo: browser manual com callback-host explícito
+        elif NO_BROWSER and CALLBACK_HOST != 'localhost':
             print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
             print(f"    {server_url}/login")
-        else:
+        # Modo: browser automático (local)
+        elif not NO_BROWSER:
             print(f"  {YELLOW}→ Opening browser for login in 2 seconds...{RESET}")
             print(f"    Or manually visit: {server_url}/login")
+        # Modo: no-browser sem callback-host (genérico)
+        else:
+            print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
+            print(f"    {server_url}/login")
 
     print()
+
+
+def _get_local_ip() -> str:
+    """Retorna o IP de saída do servidor (melhor estimativa do IP acessível externamente)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return socket.gethostname()
 
 
 def _open_login_browser():
@@ -1112,13 +1138,8 @@ def main():
         if models:
             _available_models = models
     print_startup_banner()
-    if not auth_state.get("tokens"):
-        if not NO_BROWSER:
-            threading.Thread(target=_open_login_browser, daemon=True).start()
-        else:
-            server_url = f"http://{CALLBACK_HOST}:{PORT}" if CALLBACK_HOST != 'localhost' else f"http://localhost:{PORT}"
-            print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
-            print(f"    {server_url}/login\n")
+    if not auth_state.get("tokens") and not NO_BROWSER:
+        threading.Thread(target=_open_login_browser, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
