@@ -645,18 +645,36 @@ def _map_content_types(role: str, content):
 
 
 def convert_messages_to_codex_input(messages):
-    """Convert OpenAI chat messages to Codex Responses API input format."""
+    """Convert OpenAI chat messages to Codex Responses API input format.
+
+    Codex API only accepts role=user and role=assistant.
+    - role=system  → handled separately as instructions
+    - role=tool    → skipped (Codex doesn't support tool results)
+    - role=function → skipped
+    - assistant with content=null + tool_calls → converted to placeholder text
+    """
     result = []
     for m in messages:
-        if m.get("role") == "system":
+        role = m.get("role")
+        if role == "system":
+            continue
+        # Codex API only supports user/assistant roles
+        if role in ("tool", "function"):
             continue
         content = m.get("content")
         if content is None:
-            # Skip messages with null content (e.g. tool-call placeholder messages)
-            continue
-        msg = dict(m)
-        msg["content"] = _map_content_types(msg.get("role", "user"), content)
-        result.append(msg)
+            # Assistant message that only has tool_calls — convert to placeholder
+            tool_calls = m.get("tool_calls") or []
+            if tool_calls:
+                names = ", ".join(
+                    tc.get("function", {}).get("name", "tool")
+                    for tc in tool_calls if isinstance(tc, dict)
+                )
+                content = f"[Called tool: {names}]"
+            else:
+                continue
+        # Only pass role and content to avoid unknown fields confusing the Codex API
+        result.append({"role": role, "content": _map_content_types(role, content)})
     return result
 
 def extract_system_prompt(messages):
@@ -986,13 +1004,89 @@ async def list_openai_models(request: Request):
     return JSONResponse({"object": "list", "data": data})
 
 
+@app.post("/v1/chat/completions")
+async def handle_chat_completions(request: Request):
+    """OpenAI-compatible chat completions — proxied to the Codex API."""
+    check_api_key(request)
+    token = await get_valid_token()
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        body_json = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    return await proxy_codex_request(token, body_json)
+
+
+@app.post("/v1/responses")
+async def handle_responses_api(request: Request):
+    """OpenAI Responses API — passed through directly to the Codex backend.
+
+    The Codex API already speaks the Responses API SSE format, so we just
+    swap the URL and inject the auth headers, then stream bytes straight back.
+    """
+    check_api_key(request)
+    token = await get_valid_token()
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    tokens = auth_state.get("tokens", {})
+    account_id = (tokens or {}).get("account_id") or extract_account_id(token)
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Account ID not found in token")
+
+    try:
+        body_json = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    original_model = body_json.get("model", "gpt-4o")
+    codex_model = resolve_codex_model(original_model)
+    body = dict(body_json)
+    body["model"] = codex_model
+
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'chatgpt-account-id': account_id,
+        'OpenAI-Beta': 'responses=experimental',
+        'originator': 'vars',
+        'User-Agent': 'vars (macOS; arm64)',
+        'accept': 'text/event-stream',
+        'content-type': 'application/json',
+        'accept-encoding': 'identity',
+    }
+
+    model_info = f"{GREEN}{codex_model}{RESET}" if original_model == codex_model else f"{DIM}{original_model}{RESET} → {GREEN}{codex_model}{RESET}"
+    _log("OPENAI", f"responses  {model_info}")
+
+    async def _passthrough():
+        _timeout = aiohttp.ClientTimeout(total=120)
+        try:
+            async with aiohttp.ClientSession(timeout=_timeout) as sess:
+                async with sess.post(CODEX_URL, headers=headers, json=body) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        _log("OPENAI", f"responses HTTP {resp.status}: {error_text}", level="error")
+                        return
+                    async for chunk in resp.content.iter_any():
+                        if chunk:
+                            yield chunk
+        except Exception as e:
+            _log("OPENAI", f"responses proxy error: {e}", level="error")
+
+    return StreamingResponse(_passthrough(), media_type="text/event-stream")
+
+
 _OPEN_PATHS = {"login", "auth/callback", "auth/sync", "docs", "openapi.json", "favicon.ico", ""}
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def proxy_all(request: Request, path: str):
-    # Skip auth routes
-    if path in ["login", "auth/callback", "docs", "openapi.json", "api/tags", "api/chat", "v1/models"]:
-        return await app.routes[path](request)
+    # Dedicated handlers above cover these paths; this catch-all won't see them,
+    # but keep the guard as a safety net.
+    if path in {"login", "auth/callback", "docs", "openapi.json",
+                "api/tags", "api/chat", "v1/models",
+                "v1/chat/completions", "v1/responses"}:
+        raise HTTPException(status_code=404, detail="Not found")
 
     if path == "favicon.ico":
         return Response(status_code=404)
