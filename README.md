@@ -71,7 +71,43 @@ Point any OpenAI-compatible client to the local server:
 | Setting | Value |
 |---|---|
 | Base URL | `http://localhost:11434/v1` |
-| API Key | any non-empty string (e.g. `lagp`) |
+| API Key | any non-empty string (e.g. `lagp`) — or your configured key if using `--api-key` |
+
+---
+
+## API key protection
+
+By default LAGP accepts any value (or no value) in the `Authorization` header — convenient for local, single-user setups.
+
+When you expose LAGP on a network (LAN, VPS, etc.) you can restrict access to a fixed set of keys:
+
+```bash
+# Single key
+lagp --api-key my-secret-key
+
+# Multiple keys (repeat the flag)
+lagp --api-key key-for-alice --api-key key-for-bob
+```
+
+Once at least one `--api-key` is passed, every request to the proxy **must** include a matching key:
+
+```
+Authorization: Bearer <your-api-key>
+```
+
+Requests with a missing or wrong key are rejected with HTTP **401**.
+
+### Endpoints affected
+
+| Endpoint | Protected |
+|---|:---:|
+| `POST /v1/chat/completions` | ✓ |
+| `POST /api/chat` | ✓ |
+| `GET /v1/models` | ✓ |
+| `GET /api/tags` | ✓ |
+| `GET /login`, `/auth/*` | — (always open) |
+
+> **Tip:** generate a strong key with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 ---
 
@@ -117,11 +153,20 @@ Check available models:
 curl http://localhost:11434/v1/models
 ```
 
-Send a chat message:
+Send a chat message (open access — no `--api-key` configured):
 
 ```bash
 curl http://localhost:11434/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -d '{"model": "gpt-5.3-codex", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+Send a chat message (with `--api-key` configured):
+
+```bash
+curl http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer my-secret-key" \
   -d '{"model": "gpt-5.3-codex", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
@@ -130,7 +175,11 @@ Use with the OpenAI Python SDK:
 ```python
 from openai import OpenAI
 
+# Open access (no --api-key configured)
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="lagp")
+
+# With --api-key configured — pass the real key
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="my-secret-key")
 
 response = client.chat.completions.create(
     model="gpt-5.3-codex",
@@ -241,6 +290,7 @@ Tokens expire eventually. To re-authenticate on a remote server, run either Meth
 | `--port PORT` | `11434` | Port for the proxy server |
 | `--callback-port PORT` | `1455` | Port for the OAuth callback listener |
 | `--no-browser` | off | Do not open a browser automatically |
+| `--api-key KEY` | — | Accepted client API key (repeat for multiple keys). When set, all requests must include `Authorization: Bearer <key>` |
 | `--sync-to URL` | — | Push tokens to a remote LAGP after login |
 | `--sync-secret SECRET` | — | Shared secret protecting the `/auth/sync` endpoint |
 | `--log-level LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
