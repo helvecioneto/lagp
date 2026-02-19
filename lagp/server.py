@@ -70,6 +70,7 @@ CALLBACK_HOST = "localhost"
 NO_BROWSER = False
 SYNC_TO = ""
 SYNC_SECRET = ""
+API_KEYS: set = set()  # Empty = open access; non-empty = key required
 CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
 TOKEN_URL = 'https://auth.openai.com/oauth/token'
@@ -202,6 +203,35 @@ async def get_valid_token():
     # Let's prevent unnecessary refreshes by checking exp if possible, 
     # but for simplicity, we'll implement a reactive refresh logic in the proxy.
     return tokens["access_token"]
+
+
+# --- API Key Validation ---
+
+def check_api_key(request: Request) -> None:
+    """Validate the client API key when API_KEYS is configured.
+
+    If API_KEYS is empty, all requests are allowed (open access).
+    Otherwise, the request must carry 'Authorization: Bearer <key>' with a
+    key that is in the configured set.
+    """
+    if not API_KEYS:
+        return  # No keys configured → open access
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        key = auth_header[7:].strip()
+        if key in API_KEYS:
+            return
+    _log("APIKEY", "rejected request — invalid or missing API key", level="warn")
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "error": {
+                "message": "Invalid or missing API key. Pass 'Authorization: Bearer <key>'.",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+            }
+        },
+    )
 
 
 # --- Auth Routes ---
@@ -759,6 +789,9 @@ async def handle_ollama_chat(request: Request):
     Handle Ollama-style chat requests (POST /api/chat).
     Transforms them to Codex requests and adapts the response to Ollama's NDJSON format.
     """
+    # 0. Client API key check
+    check_api_key(request)
+
     # 1. Authentication
     token = await get_valid_token()
     if not token:
@@ -894,8 +927,9 @@ async def handle_ollama_chat(request: Request):
 
 
 @app.get("/api/tags")
-async def list_ollama_models():
+async def list_ollama_models(request: Request):
     """Ollama-compatible model discovery."""
+    check_api_key(request)
     if _available_models:
         slugs = [m["slug"] for m in _available_models if m.get("slug")]
     else:
@@ -915,8 +949,9 @@ async def list_ollama_models():
     return {"models": models}
 
 @app.get("/v1/models")
-async def list_openai_models():
+async def list_openai_models(request: Request):
     """Return available models in OpenAI format (used by Cline, Cursor, etc.)"""
+    check_api_key(request)
     if _available_models:
         data = [
             {
@@ -939,20 +974,26 @@ async def list_openai_models():
     return JSONResponse({"object": "list", "data": data})
 
 
+_OPEN_PATHS = {"login", "auth/callback", "auth/sync", "docs", "openapi.json", "favicon.ico", ""}
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def proxy_all(request: Request, path: str):
     # Skip auth routes
     if path in ["login", "auth/callback", "docs", "openapi.json", "api/tags", "api/chat", "v1/models"]:
         return await app.routes[path](request)
-    
+
     if path == "favicon.ico":
         return Response(status_code=404)
-        
+
     if path == "":
         return HTMLResponse("<h1>Local LLM Proxy</h1><p>Status: Running. <a href='/login'>Login</a></p>")
 
     if request.method == "OPTIONS":
         return Response(status_code=204)
+
+    # Client API key check (skip for internal auth/admin paths)
+    if path not in _OPEN_PATHS:
+        check_api_key(request)
 
     # Load token
     token = await get_valid_token()
@@ -1038,11 +1079,17 @@ def print_startup_banner():
     else:
         status_line = f"  {YELLOW}✗ Not authenticated{RESET}"
 
+    if API_KEYS:
+        apikey_line = f"  {GREEN}✓ {len(API_KEYS)} key(s) configured{RESET}"
+    else:
+        apikey_line = f"  {DIM}None (open access){RESET}"
+
     print(f"\n{CYAN}{BOLD}╔══════════════════════════════════════════════╗{RESET}")
     print(f"{CYAN}{BOLD}║                 LAGP   v1.0                  ║{RESET}")
     print(f"{CYAN}{BOLD}╚══════════════════════════════════════════════╝{RESET}\n")
 
     print(f"  Status    :{status_line}")
+    print(f"  API Keys  : {apikey_line}")
     if authenticated and account_id:
         print(f"  Account   : {account_id}")
     if _available_models:
@@ -1058,9 +1105,12 @@ def print_startup_banner():
     print(f"    GET  /v1/models            List available models (JSON)")
     print(f"    POST /v1/chat/completions  OpenAI-compatible chat  (Cline, Cursor, etc.)")
     print(f"    POST /api/chat             Ollama-compatible chat")
+    _key_hint = f'      -H "Authorization: Bearer <your-api-key>" \\\n' if API_KEYS else ""
     print(f"\n  Quick test:")
     print(f'    curl {server_url}/v1/chat/completions \\')
     print(f'      -H "Content-Type: application/json" \\')
+    if _key_hint:
+        print(f'      -H "Authorization: Bearer <your-api-key>" \\')
     print(f'      -d \'{{"model":"gpt-5.3-codex","messages":[{{"role":"user","content":"hi"}}]}}\'')
     print(f"\n{'─' * 48}")
 
@@ -1096,7 +1146,7 @@ def _open_login_browser():
 
 
 def main():
-    global _available_models, PORT, CALLBACK_PORT, REDIRECT_URI, CALLBACK_HOST, NO_BROWSER, SYNC_TO, SYNC_SECRET
+    global _available_models, PORT, CALLBACK_PORT, REDIRECT_URI, CALLBACK_HOST, NO_BROWSER, SYNC_TO, SYNC_SECRET, API_KEYS
 
     parser = argparse.ArgumentParser(description="LAGP — LLM Auth Gateway Proxy")
     parser.add_argument("--port", type=int, default=PORT, help=f"Port for the proxy server (default: {PORT})")
@@ -1106,6 +1156,18 @@ def main():
     parser.add_argument("--callback-host", default="localhost", metavar="HOST", help="Hostname/IP do servidor para o redirect OAuth (padrão: localhost). Defina como o hostname público do servidor ao rodar remotamente.")
     parser.add_argument("--sync-to", default="", metavar="URL", help="URL do servidor remoto para enviar tokens após autenticação (ex: http://meuservidor.com:11434)")
     parser.add_argument("--sync-secret", default="", metavar="SECRET", help="Secret compartilhado para proteger o endpoint /auth/sync no servidor remoto")
+    parser.add_argument(
+        "--api-key",
+        action="append",
+        dest="api_keys",
+        metavar="KEY",
+        default=[],
+        help=(
+            "API key aceita para autenticação dos clientes (pode ser especificado múltiplas vezes). "
+            "Quando definida, requisições devem incluir 'Authorization: Bearer <key>'. "
+            "Se não definida, qualquer chave (ou nenhuma) é aceita."
+        ),
+    )
     args = parser.parse_args()
 
     _configure_logging(args.log_level)
@@ -1116,6 +1178,7 @@ def main():
     NO_BROWSER = args.no_browser
     SYNC_TO = args.sync_to.rstrip('/')
     SYNC_SECRET = args.sync_secret
+    API_KEYS = set(args.api_keys)
     REDIRECT_URI = f'http://{CALLBACK_HOST}:{CALLBACK_PORT}/auth/callback'
 
     if CALLBACK_HOST not in ('localhost', '127.0.0.1'):
