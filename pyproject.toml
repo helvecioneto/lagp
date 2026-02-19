@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lagp"
+version = "1.0.0"
+description = "Local OpenAI-compatible proxy using ChatGPT Plus via OAuth"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+keywords = ["openai", "chatgpt", "proxy", "llm", "oauth"]
+authors = [
+    {name = "lagp contributors"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "httpx>=0.24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/helvecioneto/lagp"
+Repository = "https://github.com/helvecioneto/lagp"
+"Bug Tracker" = "https://github.com/helvecioneto/lagp/issues"
+
+[project.scripts]
+lagp = "lagp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lagp*"]
