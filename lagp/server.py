@@ -66,6 +66,10 @@ def _configure_logging(level_name: str = "INFO") -> None:
 # --- Configuration ---
 PORT = 11434
 CALLBACK_PORT = 1455
+CALLBACK_HOST = "localhost"
+NO_BROWSER = False
+SYNC_TO = ""
+SYNC_SECRET = ""
 CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
 TOKEN_URL = 'https://auth.openai.com/oauth/token'
@@ -229,13 +233,21 @@ async def login():
     print(f"\n{CYAN}{BOLD}╔══════════════════════════════════════════╗{RESET}")
     print(f"{CYAN}{BOLD}║      OpenWebCode OAuth Login Flow        ║{RESET}")
     print(f"{CYAN}{BOLD}╚══════════════════════════════════════════╝{RESET}")
-    print(f"\n  {GREEN}1.{RESET} Browser will open automatically")
-    print(f"  {GREEN}2.{RESET} Log in with your OpenAI account")
-    print(f"  {GREEN}3.{RESET} Token saved automatically\n")
-    print(f"  {YELLOW}If the browser does not open, visit:{RESET}")
-    print(f"  {YELLOW}{url}{RESET}\n")
-    webbrowser.open(url)
+    if NO_BROWSER:
+        print(f"\n  {GREEN}1.{RESET} Abra a URL abaixo no seu browser")
+        print(f"  {GREEN}2.{RESET} Log in with your OpenAI account")
+        print(f"  {GREEN}3.{RESET} Token saved automatically\n")
+        print(f"  {YELLOW}Abra no seu browser:{RESET}")
+        print(f"  {YELLOW}{url}{RESET}\n")
+    else:
+        print(f"\n  {GREEN}1.{RESET} Browser will open automatically")
+        print(f"  {GREEN}2.{RESET} Log in with your OpenAI account")
+        print(f"  {GREEN}3.{RESET} Token saved automatically\n")
+        print(f"  {YELLOW}If the browser does not open, visit:{RESET}")
+        print(f"  {YELLOW}{url}{RESET}\n")
+        webbrowser.open(url)
     
+    step1_text = "Open — open the URL below in your browser" if NO_BROWSER else "Open — browser opened automatically"
     return HTMLResponse(content=f"""<!doctype html>
 <html lang="en">
 <head>
@@ -298,7 +310,7 @@ async def login():
     <div class="steps">
       <div class="step">
         <div class="step-num">1</div>
-        <div class="step-text">Open — browser opened automatically</div>
+        <div class="step-text">{step1_text}</div>
       </div>
       <div class="step">
         <div class="step-num">2</div>
@@ -309,7 +321,7 @@ async def login():
         <div class="step-text">Close — token saved, proxy is ready!</div>
       </div>
     </div>
-    <a href="{url}" class="btn" target="_blank">Open Login Page Manually</a>
+    <a href="{url}" class="btn" target="_blank">Open Login Page</a>
     <p class="waiting">Waiting for authentication<span class="dots"></span></p>
   </div>
 </body>
@@ -369,6 +381,20 @@ async def auth_callback(code: str, state: str):
   </div>
 </body>
 </html>""")
+
+@app.post("/auth/sync")
+async def receive_sync_tokens(request: Request):
+    if SYNC_SECRET:
+        provided = request.headers.get("X-Sync-Secret", "")
+        if provided != SYNC_SECRET:
+            raise HTTPException(status_code=401, detail="Invalid sync secret")
+    data = await request.json()
+    tokens = data.get("tokens")
+    if not tokens:
+        raise HTTPException(status_code=400, detail="No tokens provided")
+    save_tokens(tokens)
+    _log("SYNC", "tokens received and saved", level="ok")
+    return {"status": "ok"}
 
 # Since the callback handles /auth/callback on port 1455 in the user code, 
 # but FastAPI is running on 11434, we actually need a SECOND server or 
@@ -453,7 +479,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         if state != auth_state["state"]:
             print("State mismatch!")
             return
-            
+
         verifier = auth_state["verifier"]
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -474,11 +500,27 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
                 if aid:
                     tokens["account_id"] = aid
                 save_tokens(tokens)
+                if SYNC_TO:
+                    await self.push_tokens_to_remote(tokens)
             else:
                 _log("AUTH", f"callback exchange failed: {resp.text}", level="error")
 
-def start_callback_server():
-    server = HTTPServer(('127.0.0.1', CALLBACK_PORT), OAuthCallbackHandler)
+    async def push_tokens_to_remote(self, tokens):
+        headers = {"Content-Type": "application/json"}
+        if SYNC_SECRET:
+            headers["X-Sync-Secret"] = SYNC_SECRET
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(f"{SYNC_TO}/auth/sync", json={"tokens": tokens}, headers=headers)
+                if r.status_code == 200:
+                    print(f"\n{GREEN}{BOLD}✓ Tokens sincronizados com {SYNC_TO}{RESET}")
+                else:
+                    print(f"\n{YELLOW}✗ Falha ao sincronizar tokens: HTTP {r.status_code} — {r.text}{RESET}")
+        except Exception as e:
+            print(f"\n{RED}✗ Erro ao sincronizar tokens: {e}{RESET}")
+
+def start_callback_server(bind_host='127.0.0.1'):
+    server = HTTPServer((bind_host, CALLBACK_PORT), OAuthCallbackHandler)
     thread = threading.Thread(target=server.serve_forever)
     thread.daemon = True
     thread.start()
@@ -985,6 +1027,7 @@ def print_startup_banner():
     tokens = auth_state.get("tokens")
     authenticated = bool(tokens and tokens.get("access_token"))
     account_id = (tokens.get("account_id") or "")[:24] if tokens else ""
+    server_url = f"http://{CALLBACK_HOST}:{PORT}" if CALLBACK_HOST != 'localhost' else f"http://localhost:{PORT}"
 
     if authenticated:
         status_line = f"  {GREEN}✓ Authenticated{RESET}"
@@ -1003,23 +1046,30 @@ def print_startup_banner():
         print(f"\n  Models:")
         for slug in visible:
             print(f"    {GREEN}●{RESET} {slug}")
-        print(f"\n  {CYAN}→ Live list:{RESET} curl http://localhost:{PORT}/v1/models")
+        print(f"\n  {CYAN}→ Live list:{RESET} curl {server_url}/v1/models")
 
-    print(f"\n  Listening : http://localhost:{PORT}\n")
+    print(f"\n  Listening : {server_url}\n")
     print(f"  Endpoints:")
     print(f"    GET  /login                OAuth login flow")
     print(f"    GET  /v1/models            List available models (JSON)")
     print(f"    POST /v1/chat/completions  OpenAI-compatible chat  (Cline, Cursor, etc.)")
     print(f"    POST /api/chat             Ollama-compatible chat")
     print(f"\n  Quick test:")
-    print(f'    curl http://localhost:{PORT}/v1/chat/completions \\')
+    print(f'    curl {server_url}/v1/chat/completions \\')
     print(f'      -H "Content-Type: application/json" \\')
     print(f'      -d \'{{"model":"gpt-5.3-codex","messages":[{{"role":"user","content":"hi"}}]}}\'')
     print(f"\n{'─' * 48}")
 
+    if SYNC_TO:
+        print(f"  {CYAN}→ Sync ativo:{RESET} tokens enviados para {SYNC_TO} após auth")
+
     if not authenticated:
-        print(f"  {YELLOW}→ Opening browser for login in 2 seconds...{RESET}")
-        print(f"    Or manually visit: http://localhost:{PORT}/login")
+        if NO_BROWSER:
+            print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
+            print(f"    {server_url}/login")
+        else:
+            print(f"  {YELLOW}→ Opening browser for login in 2 seconds...{RESET}")
+            print(f"    Or manually visit: {server_url}/login")
 
     print()
 
@@ -1027,25 +1077,35 @@ def print_startup_banner():
 def _open_login_browser():
     """Wait for the server to be ready, then open the login page."""
     time.sleep(2)
-    webbrowser.open(f"http://localhost:{PORT}/login")
+    server_url = f"http://{CALLBACK_HOST}:{PORT}" if CALLBACK_HOST != 'localhost' else f"http://localhost:{PORT}"
+    webbrowser.open(f"{server_url}/login")
 
 
 def main():
-    global _available_models, PORT, CALLBACK_PORT, REDIRECT_URI
+    global _available_models, PORT, CALLBACK_PORT, REDIRECT_URI, CALLBACK_HOST, NO_BROWSER, SYNC_TO, SYNC_SECRET
 
     parser = argparse.ArgumentParser(description="LAGP — LLM Auth Gateway Proxy")
     parser.add_argument("--port", type=int, default=PORT, help=f"Port for the proxy server (default: {PORT})")
     parser.add_argument("--callback-port", type=int, default=CALLBACK_PORT, help=f"Port for the OAuth callback server (default: {CALLBACK_PORT})")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], metavar="LEVEL", help="Log verbosity: DEBUG, INFO, WARNING, ERROR (default: INFO)")
+    parser.add_argument("--no-browser", action="store_true", help="Não abrir browser automaticamente (útil para servidores headless/remotos)")
+    parser.add_argument("--callback-host", default="localhost", metavar="HOST", help="Hostname/IP do servidor para o redirect OAuth (padrão: localhost). Defina como o hostname público do servidor ao rodar remotamente.")
+    parser.add_argument("--sync-to", default="", metavar="URL", help="URL do servidor remoto para enviar tokens após autenticação (ex: http://meuservidor.com:11434)")
+    parser.add_argument("--sync-secret", default="", metavar="SECRET", help="Secret compartilhado para proteger o endpoint /auth/sync no servidor remoto")
     args = parser.parse_args()
 
     _configure_logging(args.log_level)
 
     PORT = args.port
     CALLBACK_PORT = args.callback_port
-    REDIRECT_URI = f'http://localhost:{CALLBACK_PORT}/auth/callback'
+    CALLBACK_HOST = args.callback_host
+    NO_BROWSER = args.no_browser
+    SYNC_TO = args.sync_to.rstrip('/')
+    SYNC_SECRET = args.sync_secret
+    REDIRECT_URI = f'http://{CALLBACK_HOST}:{CALLBACK_PORT}/auth/callback'
 
-    start_callback_server()
+    callback_bind = '0.0.0.0' if CALLBACK_HOST != 'localhost' else '127.0.0.1'
+    start_callback_server(callback_bind)
     load_tokens()
     if auth_state.get("tokens"):
         models = asyncio.run(fetch_codex_models())
@@ -1053,7 +1113,12 @@ def main():
             _available_models = models
     print_startup_banner()
     if not auth_state.get("tokens"):
-        threading.Thread(target=_open_login_browser, daemon=True).start()
+        if not NO_BROWSER:
+            threading.Thread(target=_open_login_browser, daemon=True).start()
+        else:
+            server_url = f"http://{CALLBACK_HOST}:{PORT}" if CALLBACK_HOST != 'localhost' else f"http://localhost:{PORT}"
+            print(f"  {YELLOW}→ Abra a URL abaixo no seu browser para autenticar:{RESET}")
+            print(f"    {server_url}/login\n")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
