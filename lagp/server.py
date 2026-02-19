@@ -501,23 +501,27 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
                     tokens["account_id"] = aid
                 save_tokens(tokens)
                 if SYNC_TO:
-                    await self.push_tokens_to_remote(tokens)
+                    await _sync_tokens(tokens)
             else:
                 _log("AUTH", f"callback exchange failed: {resp.text}", level="error")
 
-    async def push_tokens_to_remote(self, tokens):
-        headers = {"Content-Type": "application/json"}
-        if SYNC_SECRET:
-            headers["X-Sync-Secret"] = SYNC_SECRET
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.post(f"{SYNC_TO}/auth/sync", json={"tokens": tokens}, headers=headers)
-                if r.status_code == 200:
-                    print(f"\n{GREEN}{BOLD}✓ Tokens sincronizados com {SYNC_TO}{RESET}")
-                else:
-                    print(f"\n{YELLOW}✗ Falha ao sincronizar tokens: HTTP {r.status_code} — {r.text}{RESET}")
-        except Exception as e:
-            print(f"\n{RED}✗ Erro ao sincronizar tokens: {e}{RESET}")
+async def _sync_tokens(tokens: dict) -> bool:
+    """Push tokens to a remote LAGP instance via /auth/sync. Returns True on success."""
+    headers = {"Content-Type": "application/json"}
+    if SYNC_SECRET:
+        headers["X-Sync-Secret"] = SYNC_SECRET
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{SYNC_TO}/auth/sync", json={"tokens": tokens}, headers=headers)
+            if r.status_code == 200:
+                print(f"\n{GREEN}{BOLD}✓ Tokens synced to remote server.{RESET}")
+                return True
+            else:
+                print(f"\n{YELLOW}✗ Sync failed: HTTP {r.status_code} — {r.text}{RESET}")
+    except Exception as e:
+        print(f"\n{RED}✗ Sync error: {e}{RESET}")
+    return False
+
 
 def start_callback_server(bind_host='127.0.0.1'):
     server = HTTPServer((bind_host, CALLBACK_PORT), OAuthCallbackHandler)
@@ -1125,6 +1129,8 @@ def main():
     start_callback_server(callback_bind)
     load_tokens()
     if auth_state.get("tokens"):
+        if SYNC_TO:
+            asyncio.run(_sync_tokens(auth_state["tokens"]))
         models = asyncio.run(fetch_codex_models())
         if models:
             _available_models = models
