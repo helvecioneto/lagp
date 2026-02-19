@@ -549,7 +549,9 @@ async def _sync_tokens(tokens: dict) -> bool:
             else:
                 print(f"\n{YELLOW}✗ Sync failed: HTTP {r.status_code} — {r.text}{RESET}")
     except Exception as e:
-        print(f"\n{RED}✗ Sync error: {e}{RESET}")
+        msg = str(e) or repr(e)
+        print(f"\n{RED}✗ Sync error ({type(e).__name__}): {msg}{RESET}")
+        _log("SYNC", f"sync to {SYNC_TO} failed — {type(e).__name__}: {msg}", level="error")
     return False
 
 
