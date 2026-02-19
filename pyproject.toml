@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lagp"
-version = "1.0.1"
+version = "1.0.2"
 description = "Local OpenAI-compatible proxy using ChatGPT Plus via OAuth"
 readme = "README.md"
 requires-python = ">=3.9"
